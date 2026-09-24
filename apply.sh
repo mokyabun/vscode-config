@@ -8,6 +8,8 @@ TARGET=all
 PROFILE=all
 DRY_RUN=0
 SKIP_EXTENSIONS=0
+VERBOSE=0
+PRUNE_EXTENSIONS=0
 
 usage() {
     cat <<'EOF'
@@ -18,11 +20,14 @@ Options:
   --profile NAME|all              Apply one profile (default: all)
   --dry-run                       Show changes without writing/installing
   --skip-extensions               Do not install extensions
+  --prune-extensions              Uninstall extensions previously installed by this tool
+  --verbose                       Show successful operations
   -h, --help                      Show this help
 
 Environment:
   VSCODE_USER_DIR, CODE_SERVER_USER_DIR
   VSCODE_BIN (default: code), CODE_SERVER_BIN (default: code-server)
+  VSCODE_CONFIG_STATE_FILE
 EOF
 }
 
@@ -52,6 +57,14 @@ parse_options() {
                 SKIP_EXTENSIONS=1
                 shift
                 ;;
+            --prune-extensions)
+                PRUNE_EXTENSIONS=1
+                shift
+                ;;
+            --verbose)
+                VERBOSE=1
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -71,6 +84,12 @@ parse_options() {
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+show_status() {
+    if [ "$VERBOSE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+        echo "$*"
+    fi
 }
 
 find_repository_root() {
@@ -147,6 +166,8 @@ run_target() {
         --profile "$PROFILE"
     [ "$DRY_RUN" -eq 0 ] || set -- "$@" --dry-run
     [ "$SKIP_EXTENSIONS" -eq 0 ] || set -- "$@" --skip-extensions
+    [ "$PRUNE_EXTENSIONS" -eq 0 ] || set -- "$@" --prune-extensions
+    [ "$VERBOSE" -eq 0 ] || set -- "$@" --verbose
     "$@"
 }
 
@@ -154,17 +175,17 @@ apply_vscode() {
     if [ "$TARGET" = vscode ] || command -v "$VSCODE_BIN" >/dev/null 2>&1 || [ -d "$VSCODE_USER_DIR" ]; then
         run_target vscode "$VSCODE_USER_DIR" "$VSCODE_BIN"
     else
-        echo "skip: VS Code was not detected"
+        show_status "skip: VS Code was not detected"
     fi
 }
 
 apply_code_server() {
     if [ "$TARGET" = all ] && [ "$PROFILE" != all ] && [ "$PROFILE" != default ]; then
-        echo "skip: code-server has no '$PROFILE' profile (default only)"
+        show_status "skip: code-server has no '$PROFILE' profile (default only)"
     elif [ "$TARGET" = code-server ] || command -v "$CODE_SERVER_BIN" >/dev/null 2>&1 || [ -d "$CODE_SERVER_USER_DIR" ]; then
         run_target code-server "$CODE_SERVER_USER_DIR" "$CODE_SERVER_BIN"
     else
-        echo "skip: code-server was not detected"
+        show_status "skip: code-server was not detected"
     fi
 }
 

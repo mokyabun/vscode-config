@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import os
 import shutil
@@ -11,6 +13,47 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+
+STATE_VERSION = 1
+
+
+def default_state_path() -> Path:
+    override = os.environ.get("VSCODE_CONFIG_STATE_FILE")
+    if override:
+        return Path(override).expanduser()
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    return state_home / "vscode-config" / "state.json"
+
+
+class StateStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        if path.exists():
+            loaded = load_jsonc(path, {})
+            if not isinstance(loaded, dict):
+                raise RuntimeError(f"invalid state file: {path}")
+            version = loaded.get("version")
+            if version != STATE_VERSION:
+                raise RuntimeError(f"unsupported state version {version!r} in {path}")
+            self.data = loaded
+        else:
+            self.data: dict[str, Any] = {"version": STATE_VERSION, "targets": {}}
+
+    def profile(self, target: str, user_dir: Path, profile: str) -> dict[str, Any]:
+        targets = self.data.setdefault("targets", {})
+        target_state = targets.setdefault(target, {})
+        instances = target_state.setdefault("instances", {})
+        instance = instances.setdefault(str(user_dir.expanduser().resolve()), {})
+        profiles = instance.setdefault("profiles", {})
+        return profiles.setdefault(profile, {})
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary.write_text(json.dumps(self.data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, self.path)
 
 
 def strip_jsonc(text: str) -> str:
@@ -104,18 +147,74 @@ def deep_merge(base: Any, patch: Any) -> Any:
     return patch
 
 
-def merge_keybindings(base: list[Any], patch: list[Any]) -> list[Any]:
-    result = list(base)
-    for binding in patch:
-        if binding not in result:
-            result.append(binding)
-    return result
+def value_hash(value: Any) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def write_if_changed(path: Path, value: Any, dry_run: bool) -> None:
+def encode_pointer(parts: tuple[str, ...]) -> str:
+    return "/" + "/".join(part.replace("~", "~0").replace("/", "~1") for part in parts)
+
+
+def decode_pointer(pointer: str) -> tuple[str, ...]:
+    if not pointer.startswith("/"):
+        raise RuntimeError(f"invalid managed setting path: {pointer}")
+    return tuple(part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/"))
+
+
+def flatten_leaves(value: Any, prefix: tuple[str, ...] = ()) -> dict[str, Any]:
+    if isinstance(value, dict) and value:
+        leaves: dict[str, Any] = {}
+        for key, child in value.items():
+            leaves.update(flatten_leaves(child, (*prefix, key)))
+        return leaves
+    return {encode_pointer(prefix): value} if prefix else {}
+
+
+def get_path(value: dict[str, Any], parts: tuple[str, ...]) -> tuple[bool, Any]:
+    current: Any = value
+    for part in parts:
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def set_path(value: dict[str, Any], parts: tuple[str, ...], desired: Any) -> None:
+    current = value
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[parts[-1]] = copy.deepcopy(desired)
+
+
+def remove_path(value: dict[str, Any], parts: tuple[str, ...]) -> None:
+    parents: list[tuple[dict[str, Any], str]] = []
+    current: Any = value
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return
+        parents.append((current, part))
+        current = current[part]
+    if not isinstance(current, dict):
+        return
+    current.pop(parts[-1], None)
+    for parent, key in reversed(parents):
+        child = parent.get(key)
+        if isinstance(child, dict) and not child:
+            parent.pop(key, None)
+        else:
+            break
+
+
+def write_if_changed(path: Path, value: Any, dry_run: bool, verbose: bool) -> None:
     current = load_jsonc(path, [] if isinstance(value, list) else {})
     if current == value:
-        print(f"ok:   {path}")
+        if verbose:
+            print(f"ok:   {path}")
         return
     if dry_run:
         print(f"would patch: {path}")
@@ -126,7 +225,104 @@ def write_if_changed(path: Path, value: Any, dry_run: bool) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(value, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(temporary, path)
-    print(f"patched: {path}")
+    if verbose:
+        print(f"patched: {path}")
+
+
+def reconcile_settings(
+    path: Path,
+    desired: dict[str, Any],
+    profile_state: dict[str, Any],
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    current = load_jsonc(path, {})
+    if not isinstance(current, dict):
+        raise RuntimeError(f"settings must contain a JSON object: {path}")
+
+    previous = profile_state.get("settings", {})
+    if not isinstance(previous, dict):
+        previous = {}
+    desired_leaves = flatten_leaves(desired)
+    result = copy.deepcopy(current)
+
+    stale = set(previous) - set(desired_leaves)
+    for pointer in sorted(stale, key=lambda item: len(decode_pointer(item)), reverse=True):
+        parts = decode_pointer(pointer)
+        exists, current_value = get_path(result, parts)
+        if not exists:
+            continue
+        if value_hash(current_value) == previous[pointer]:
+            remove_path(result, parts)
+        else:
+            print(f"warn: preserving modified setting removed from config: {pointer}", file=sys.stderr)
+
+    for pointer, desired_value in desired_leaves.items():
+        set_path(result, decode_pointer(pointer), desired_value)
+
+    write_if_changed(path, result, dry_run, verbose)
+    if not dry_run:
+        profile_state["settings"] = {
+            pointer: value_hash(value) for pointer, value in sorted(desired_leaves.items())
+        }
+
+
+def keybinding_identity(binding: Any) -> str:
+    if not isinstance(binding, dict):
+        return value_hash(binding)
+    return value_hash({key: binding.get(key) for key in ("key", "command", "when")})
+
+
+def reconcile_keybindings(
+    path: Path,
+    desired: list[Any],
+    profile_state: dict[str, Any],
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    current = load_jsonc(path, [])
+    if not isinstance(current, list):
+        raise RuntimeError(f"keybindings must contain a JSON array: {path}")
+
+    previous_raw = profile_state.get("keybindings", [])
+    previous = [
+        item
+        for item in previous_raw
+        if isinstance(item, dict) and isinstance(item.get("identity"), str) and isinstance(item.get("hash"), str)
+    ] if isinstance(previous_raw, list) else []
+    desired_meta = [
+        {"identity": keybinding_identity(binding), "hash": value_hash(binding)} for binding in desired
+    ]
+    desired_identities = {item["identity"] for item in desired_meta}
+    desired_hashes = {item["hash"] for item in desired_meta}
+    previous_hashes = {item["hash"] for item in previous}
+    previous_identities = {item["identity"] for item in previous}
+    warned: set[str] = set()
+    result: list[Any] = []
+
+    for binding in current:
+        binding_hash = value_hash(binding)
+        identity = keybinding_identity(binding)
+        if binding_hash in previous_hashes:
+            if binding_hash in desired_hashes:
+                result.append(binding)
+            continue
+        if identity in previous_identities and identity in desired_identities:
+            continue
+        if identity in previous_identities and identity not in desired_identities and identity not in warned:
+            print("warn: preserving modified keybinding removed from config", file=sys.stderr)
+            warned.add(identity)
+        result.append(binding)
+
+    existing_hashes = {value_hash(binding) for binding in result}
+    for binding, metadata in zip(desired, desired_meta):
+        if metadata["hash"] not in existing_hashes:
+            result.append(binding)
+            existing_hashes.add(metadata["hash"])
+
+    write_if_changed(path, result, dry_run, verbose)
+    if not dry_run:
+        profile_state["keybindings"] = desired_meta
 
 
 def walk_dicts(value: Any):
@@ -195,7 +391,15 @@ def command_exists(command: str) -> bool:
     return Path(command).is_file() or shutil.which(command) is not None
 
 
-def install_extensions(command: str, profile: str, extensions: list[str], dry_run: bool) -> bool:
+def install_extensions(
+    command: str,
+    profile: str,
+    extensions: list[str],
+    profile_state: dict[str, Any],
+    dry_run: bool,
+    prune: bool,
+    verbose: bool,
+) -> bool:
     profile_args = [] if profile == "default" else ["--profile", profile]
     if not command_exists(command):
         print(f"warn: extension command not found: {command}", file=sys.stderr)
@@ -207,25 +411,79 @@ def install_extensions(command: str, profile: str, extensions: list[str], dry_ru
         text=True,
     )
     if list_result.returncode != 0:
-        message = list_result.stderr.strip() or list_result.stdout.strip()
-        print(f"warn: cannot list {profile} extensions: {message}", file=sys.stderr)
+        print(f"warn: cannot list {profile} extensions", file=sys.stderr)
+        if verbose:
+            message = list_result.stderr.strip() or list_result.stdout.strip()
+            if message:
+                print(message, file=sys.stderr)
         return False
     installed = {line.strip().lower() for line in list_result.stdout.splitlines() if line.strip()}
-    missing = [extension for extension in extensions if extension.lower() not in installed]
-    if not missing:
-        print(f"ok:   {profile} extensions")
-        return True
+    desired = {extension.lower(): extension for extension in extensions}
+    owned_raw = profile_state.get("installedExtensions", [])
+    owned = {item.lower() for item in owned_raw if isinstance(item, str)} if isinstance(owned_raw, list) else set()
     success = True
-    for extension in missing:
+
+    for extension_key, extension in desired.items():
+        if extension_key in installed:
+            continue
         if dry_run:
             print(f"would install ({profile}): {extension}")
             continue
         result = subprocess.run(
-            [command, *profile_args, "--install-extension", extension], check=False
+            [command, *profile_args, "--install-extension", extension],
+            check=False,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             print(f"warn: failed to install ({profile}): {extension}", file=sys.stderr)
+            if verbose:
+                message = result.stderr.strip() or result.stdout.strip()
+                if message:
+                    print(message, file=sys.stderr)
             success = False
+        else:
+            owned.add(extension_key)
+            installed.add(extension_key)
+            if verbose:
+                print(f"installed ({profile}): {extension}")
+
+    for extension_key in sorted(owned - set(desired)):
+        if extension_key not in installed:
+            owned.discard(extension_key)
+            continue
+        if not prune:
+            print(
+                f"warn: managed extension is no longer configured ({profile}): {extension_key}; "
+                "use --prune-extensions to remove it",
+                file=sys.stderr,
+            )
+            continue
+        if dry_run:
+            print(f"would uninstall ({profile}): {extension_key}")
+            continue
+        result = subprocess.run(
+            [command, *profile_args, "--uninstall-extension", extension_key],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"warn: failed to uninstall ({profile}): {extension_key}", file=sys.stderr)
+            if verbose:
+                message = result.stderr.strip() or result.stdout.strip()
+                if message:
+                    print(message, file=sys.stderr)
+            success = False
+        else:
+            owned.discard(extension_key)
+            if verbose:
+                print(f"uninstalled ({profile}): {extension_key}")
+
+    if not dry_run:
+        profile_state["installedExtensions"] = sorted(owned)
+    if verbose and success and not (set(desired) - installed) and not (owned - set(desired)):
+        print(f"ok:   {profile} extensions")
     return success
 
 
@@ -243,8 +501,11 @@ def apply_profile(
     profile: str,
     profile_id: str | None,
     command: str,
+    profile_state: dict[str, Any],
     dry_run: bool,
     skip_extensions: bool,
+    prune_extensions: bool,
+    verbose: bool,
 ) -> bool:
     base_dir = repo / "profiles" / "_base"
     profile_dir = repo / "profiles" / profile
@@ -253,23 +514,40 @@ def apply_profile(
     settings = {}
     for source in (base_dir / "settings.jsonc", profile_dir / "settings.jsonc"):
         settings = deep_merge(settings, load_jsonc(source, {}))
-    current_settings = load_jsonc(target_dir / "settings.json", {})
-    write_if_changed(target_dir / "settings.json", deep_merge(current_settings, settings), dry_run)
+    if not isinstance(settings, dict):
+        raise RuntimeError(f"settings sources must contain JSON objects: {profile_dir}")
+    reconcile_settings(
+        target_dir / "settings.json",
+        settings,
+        profile_state,
+        dry_run,
+        verbose,
+    )
 
     keybindings_source = profile_dir / "keybindings.jsonc"
-    if keybindings_source.exists():
-        current_keybindings = load_jsonc(target_dir / "keybindings.json", [])
-        desired_keybindings = load_jsonc(keybindings_source, [])
-        write_if_changed(
-            target_dir / "keybindings.json",
-            merge_keybindings(current_keybindings, desired_keybindings),
-            dry_run,
-        )
+    desired_keybindings = load_jsonc(keybindings_source, [])
+    if not isinstance(desired_keybindings, list):
+        raise RuntimeError(f"keybindings source must contain a JSON array: {keybindings_source}")
+    reconcile_keybindings(
+        target_dir / "keybindings.json",
+        desired_keybindings,
+        profile_state,
+        dry_run,
+        verbose,
+    )
 
     if skip_extensions:
         return True
     extensions = read_extensions(base_dir / "extensions.txt", profile_dir / "extensions.txt")
-    return install_extensions(command, profile, extensions, dry_run)
+    return install_extensions(
+        command,
+        profile,
+        extensions,
+        profile_state,
+        dry_run,
+        prune_extensions,
+        verbose,
+    )
 
 
 def main() -> int:
@@ -281,6 +559,9 @@ def main() -> int:
     parser.add_argument("--profile", default="all")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-extensions", action="store_true")
+    parser.add_argument("--prune-extensions", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--state-file", type=Path, default=default_state_path())
     args = parser.parse_args()
 
     available = configured_profiles(args.repo)
@@ -296,7 +577,9 @@ def main() -> int:
             return 2
         requested = ["default"]
 
-    print(f"\n[{args.target}] {args.user_dir}")
+    if args.verbose or args.dry_run:
+        print(f"\n[{args.target}] {args.user_dir}")
+    state_store = StateStore(args.state_file)
     profile_ids = resolve_profiles(args.user_dir) if args.target == "vscode" else {}
     success = True
     for profile in requested:
@@ -307,15 +590,22 @@ def main() -> int:
                 file=sys.stderr,
             )
             continue
-        success = apply_profile(
+        profile_state = state_store.profile(args.target, args.user_dir, profile)
+        profile_success = apply_profile(
             args.repo,
             args.user_dir,
             profile,
             profile_id,
             args.command,
+            profile_state,
             args.dry_run,
             args.skip_extensions,
-        ) and success
+            args.prune_extensions,
+            args.verbose,
+        )
+        if not args.dry_run:
+            state_store.save()
+        success = profile_success and success
     return 0 if success else 1
 
 
