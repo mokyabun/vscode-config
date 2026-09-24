@@ -2,49 +2,7 @@
 
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-
-# When this file is piped directly to sh, fetch the rest of the repository and
-# run the checked-out copy. A normal local invocation skips this block.
-BOOTSTRAP_REQUIRED=0
-case ${0##*/} in
-    apply.sh) ;;
-    *) BOOTSTRAP_REQUIRED=1 ;;
-esac
-
-if [ "$BOOTSTRAP_REQUIRED" -eq 1 ] || [ ! -f "$SCRIPT_DIR/scripts/apply.py" ] || [ ! -f "$SCRIPT_DIR/profiles/_base/settings.jsonc" ]; then
-    command -v tar >/dev/null 2>&1 || {
-        echo "error: tar is required" >&2
-        exit 1
-    }
-
-    BOOTSTRAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vscode-config.XXXXXX")
-    cleanup() {
-        rm -rf -- "$BOOTSTRAP_DIR"
-    }
-    trap cleanup 0
-    trap 'exit 1' HUP INT TERM
-
-    ARCHIVE="$BOOTSTRAP_DIR/vscode-config.tar.gz"
-    ARCHIVE_URL="https://codeload.github.com/mokyabun/vscode-config/tar.gz/refs/heads/main"
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$ARCHIVE_URL" -o "$ARCHIVE"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$ARCHIVE" "$ARCHIVE_URL"
-    else
-        echo "error: curl or wget is required" >&2
-        exit 1
-    fi
-
-    mkdir "$BOOTSTRAP_DIR/repo"
-    tar -xzf "$ARCHIVE" -C "$BOOTSTRAP_DIR/repo" --strip-components=1
-    if sh "$BOOTSTRAP_DIR/repo/apply.sh" "$@"; then
-        exit 0
-    else
-        exit $?
-    fi
-fi
+REPOSITORY_ARCHIVE_URL="https://codeload.github.com/mokyabun/vscode-config/tar.gz/refs/heads/main"
 
 TARGET=all
 PROFILE=all
@@ -68,70 +26,121 @@ Environment:
 EOF
 }
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --target)
-            [ "$#" -ge 2 ] || { echo "error: --target requires a value" >&2; exit 2; }
-            TARGET=$2
-            shift 2
-            ;;
-        --profile)
-            [ "$#" -ge 2 ] || { echo "error: --profile requires a value" >&2; exit 2; }
-            PROFILE=$2
-            shift 2
-            ;;
-        --dry-run)
-            DRY_RUN=1
-            shift
-            ;;
-        --skip-extensions)
-            SKIP_EXTENSIONS=1
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "error: unknown option: $1" >&2
-            usage >&2
-            exit 2
-            ;;
-    esac
-done
-
-case "$TARGET" in
-    vscode|code-server|all) ;;
-    *) echo "error: invalid target: $TARGET" >&2; exit 2 ;;
-esac
-
-command -v python3 >/dev/null 2>&1 || {
-    echo "error: Python 3 is required" >&2
+die() {
+    echo "error: $*" >&2
     exit 1
 }
 
-case $(uname -s) in
-    Darwin)
-        DEFAULT_VSCODE_USER_DIR="$HOME/Library/Application Support/Code/User"
-        ;;
-    *)
-        DEFAULT_VSCODE_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/Code/User"
-        ;;
-esac
+parse_options() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --target)
+                [ "$#" -ge 2 ] || die "--target requires a value"
+                TARGET=$2
+                shift 2
+                ;;
+            --profile)
+                [ "$#" -ge 2 ] || die "--profile requires a value"
+                PROFILE=$2
+                shift 2
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --skip-extensions)
+                SKIP_EXTENSIONS=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                usage >&2
+                die "unknown option: $1"
+                ;;
+        esac
+    done
 
-DEFAULT_CODE_SERVER_USER_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/code-server/User"
-VSCODE_USER_DIR=${VSCODE_USER_DIR:-$DEFAULT_VSCODE_USER_DIR}
-CODE_SERVER_USER_DIR=${CODE_SERVER_USER_DIR:-$DEFAULT_CODE_SERVER_USER_DIR}
-VSCODE_BIN=${VSCODE_BIN:-code}
-CODE_SERVER_BIN=${CODE_SERVER_BIN:-code-server}
+    case "$TARGET" in
+        vscode|code-server|all) ;;
+        *) die "invalid target: $TARGET" ;;
+    esac
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+find_repository_root() {
+    case "$0" in
+        */*) script_path=$0 ;;
+        *) script_path=$(command -v "$0" 2>/dev/null) || return 1 ;;
+    esac
+
+    [ -f "$script_path" ] || return 1
+    script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+    [ -f "$script_dir/scripts/apply.py" ] || return 1
+    [ -f "$script_dir/profiles/_base/settings.jsonc" ] || return 1
+    printf '%s\n' "$script_dir"
+}
+
+download_repository() {
+    destination=$1
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$REPOSITORY_ARCHIVE_URL" -o "$destination"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$destination" "$REPOSITORY_ARCHIVE_URL"
+    else
+        die "curl or wget is required"
+    fi
+}
+
+bootstrap() (
+    require_command tar
+
+    bootstrap_dir=$(mktemp -d "${TMPDIR:-/tmp}/vscode-config.XXXXXX")
+    cleanup() {
+        rm -rf -- "$bootstrap_dir"
+    }
+    trap cleanup 0
+    trap 'exit 1' HUP INT TERM
+
+    archive="$bootstrap_dir/vscode-config.tar.gz"
+    repository="$bootstrap_dir/repository"
+
+    download_repository "$archive"
+    mkdir "$repository"
+    tar -xzf "$archive" -C "$repository" --strip-components=1
+    sh "$repository/apply.sh" "$@"
+)
+
+configure_environment() {
+    case $(uname -s) in
+        Darwin)
+            default_vscode_user_dir="$HOME/Library/Application Support/Code/User"
+            ;;
+        *)
+            default_vscode_user_dir="${XDG_CONFIG_HOME:-$HOME/.config}/Code/User"
+            ;;
+    esac
+
+    default_code_server_user_dir="${XDG_DATA_HOME:-$HOME/.local/share}/code-server/User"
+    VSCODE_USER_DIR=${VSCODE_USER_DIR:-$default_vscode_user_dir}
+    CODE_SERVER_USER_DIR=${CODE_SERVER_USER_DIR:-$default_code_server_user_dir}
+    VSCODE_BIN=${VSCODE_BIN:-code}
+    CODE_SERVER_BIN=${CODE_SERVER_BIN:-code-server}
+}
 
 run_target() {
     kind=$1
     user_dir=$2
     editor_bin=$3
 
-    set -- python3 "$SCRIPT_DIR/scripts/apply.py" \
-        --repo "$SCRIPT_DIR" \
+    set -- python3 "$REPOSITORY_ROOT/scripts/apply.py" \
+        --repo "$REPOSITORY_ROOT" \
         --target "$kind" \
         --user-dir "$user_dir" \
         --command "$editor_bin" \
@@ -141,24 +150,48 @@ run_target() {
     "$@"
 }
 
-status=0
-
-if [ "$TARGET" = vscode ] || [ "$TARGET" = all ]; then
+apply_vscode() {
     if [ "$TARGET" = vscode ] || command -v "$VSCODE_BIN" >/dev/null 2>&1 || [ -d "$VSCODE_USER_DIR" ]; then
-        run_target vscode "$VSCODE_USER_DIR" "$VSCODE_BIN" || status=$?
+        run_target vscode "$VSCODE_USER_DIR" "$VSCODE_BIN"
     else
         echo "skip: VS Code was not detected"
     fi
-fi
+}
 
-if [ "$TARGET" = code-server ] || [ "$TARGET" = all ]; then
+apply_code_server() {
     if [ "$TARGET" = all ] && [ "$PROFILE" != all ] && [ "$PROFILE" != default ]; then
         echo "skip: code-server has no '$PROFILE' profile (default only)"
     elif [ "$TARGET" = code-server ] || command -v "$CODE_SERVER_BIN" >/dev/null 2>&1 || [ -d "$CODE_SERVER_USER_DIR" ]; then
-        run_target code-server "$CODE_SERVER_USER_DIR" "$CODE_SERVER_BIN" || status=$?
+        run_target code-server "$CODE_SERVER_USER_DIR" "$CODE_SERVER_BIN"
     else
         echo "skip: code-server was not detected"
     fi
-fi
+}
 
-exit "$status"
+apply_configurations() {
+    status=0
+
+    if [ "$TARGET" = vscode ] || [ "$TARGET" = all ]; then
+        apply_vscode || status=$?
+    fi
+    if [ "$TARGET" = code-server ] || [ "$TARGET" = all ]; then
+        apply_code_server || status=$?
+    fi
+
+    return "$status"
+}
+
+main() {
+    parse_options "$@"
+
+    if ! REPOSITORY_ROOT=$(find_repository_root); then
+        bootstrap "$@"
+        return
+    fi
+
+    require_command python3
+    configure_environment
+    apply_configurations
+}
+
+main "$@"
