@@ -29,4 +29,6 @@ Named profiles must already exist in VS Code:
 ./apply.sh --profile node-modern
 ```
 
+Missing profiles are skipped with a warning.
+
 code-server uses the `default` profile only.

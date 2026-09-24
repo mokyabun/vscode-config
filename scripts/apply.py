@@ -303,10 +303,9 @@ def main() -> int:
         profile_id = None if profile == "default" else profile_ids.get(profile)
         if profile != "default" and profile_id is None:
             print(
-                f"warn: VS Code profile '{profile}' was not found; create/open it once and rerun",
+                f"warn: VS Code profile '{profile}' was not found; skipping",
                 file=sys.stderr,
             )
-            success = False
             continue
         success = apply_profile(
             args.repo,
