@@ -3,6 +3,49 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# When this file is piped directly to sh, fetch the rest of the repository and
+# run the checked-out copy. A normal local invocation skips this block.
+BOOTSTRAP_REQUIRED=0
+case ${0##*/} in
+    apply.sh) ;;
+    *) BOOTSTRAP_REQUIRED=1 ;;
+esac
+
+if [ "$BOOTSTRAP_REQUIRED" -eq 1 ] || [ ! -f "$SCRIPT_DIR/scripts/apply.py" ] || [ ! -f "$SCRIPT_DIR/profiles/_base/settings.jsonc" ]; then
+    command -v tar >/dev/null 2>&1 || {
+        echo "error: tar is required" >&2
+        exit 1
+    }
+
+    BOOTSTRAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vscode-config.XXXXXX")
+    cleanup() {
+        rm -rf -- "$BOOTSTRAP_DIR"
+    }
+    trap cleanup 0
+    trap 'exit 1' HUP INT TERM
+
+    ARCHIVE="$BOOTSTRAP_DIR/vscode-config.tar.gz"
+    ARCHIVE_URL="https://codeload.github.com/mokyabun/vscode-config/tar.gz/refs/heads/main"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$ARCHIVE_URL" -o "$ARCHIVE"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$ARCHIVE" "$ARCHIVE_URL"
+    else
+        echo "error: curl or wget is required" >&2
+        exit 1
+    fi
+
+    mkdir "$BOOTSTRAP_DIR/repo"
+    tar -xzf "$ARCHIVE" -C "$BOOTSTRAP_DIR/repo" --strip-components=1
+    if sh "$BOOTSTRAP_DIR/repo/apply.sh" "$@"; then
+        exit 0
+    else
+        exit $?
+    fi
+fi
+
 TARGET=all
 PROFILE=all
 DRY_RUN=0

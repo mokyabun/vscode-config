@@ -3,6 +3,12 @@
 Personal VS Code and code-server settings for macOS and Linux.
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/mokyabun/vscode-config/main/apply.sh | sh
+```
+
+Or from a local clone:
+
+```sh
 ./apply.sh --dry-run
 ./apply.sh
 ```
