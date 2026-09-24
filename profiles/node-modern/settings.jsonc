@@ -1,0 +1,27 @@
+{
+    "editor.defaultFormatter": "oxc.oxc-vscode",
+    "[typescript, javascript, typescriptreact, javascriptreact, json, jsonc]": {
+        "editor.defaultFormatter": "oxc.oxc-vscode"
+    },
+    "editor.codeActionsOnSave": {
+        "source.fixAll.oxc": "explicit"
+    },
+    "json.schemaDownload.trustedDomains": {
+        "https://schemastore.azurewebsites.net/": true,
+        "https://raw.githubusercontent.com/microsoft/vscode/": true,
+        "https://raw.githubusercontent.com/devcontainers/spec/": true,
+        "https://www.schemastore.org/": true,
+        "https://json.schemastore.org/": true,
+        "https://json-schema.org/": true,
+        "https://developer.microsoft.com/json-schemas/": true
+    },
+    "typescript.experimental.useTsgo": true,
+    "[typescriptreact]": {
+        "editor.defaultFormatter": "oxc.oxc-vscode"
+    },
+    "oxc.enable.oxfmt": true,
+    "oxc.enable.oxlint": true,
+    "svelte.enable-ts-plugin": true,
+    "extensions.ignoreRecommendations": true
+}
+

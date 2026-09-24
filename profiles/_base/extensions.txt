@@ -1,0 +1,4 @@
+dracula-theme.theme-dracula
+thang-nm.catppuccin-perfect-icons
+EditorConfig.EditorConfig
+

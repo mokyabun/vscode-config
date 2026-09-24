@@ -1,0 +1,6 @@
+oxc.oxc-vscode
+bradlc.vscode-tailwindcss
+ritwickdey.liveserver
+TypeScriptTeam.native-preview
+svelte.svelte-vscode
+

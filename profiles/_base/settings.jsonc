@@ -1,0 +1,57 @@
+{
+    "editor.fontSize": 12,
+    "editor.tabSize": 4,
+    "editor.formatOnSave": true,
+    "editor.minimap.enabled": false,
+    "editor.bracketPairColorization.enabled": true,
+    "editor.guides.bracketPairs": "active",
+    "editor.stickyScroll.enabled": true,
+    "editor.cursorBlinking": "smooth",
+    "editor.linkedEditing": true,
+    "editor.renderWhitespace": "boundary",
+    "editor.inlayHints.enabled": "onUnlessPressed",
+    "editor.suggestSelection": "first",
+    "editor.snippetSuggestions": "top",
+    "editor.wordBasedSuggestions": "off",
+    "editor.acceptSuggestionOnEnter": "smart",
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "terminal.integrated.fontFamily": "JetBrainsMono Nerd Font",
+    "terminal.integrated.mouseWheelScrollSensitivity": 3,
+    "terminal.integrated.defaultProfile.osx": "fish",
+    "terminal.integrated.profiles.osx": {
+        "fish": {
+            "path": "fish",
+            "args": ["-l"]
+        }
+    },
+    "terminal.integrated.defaultProfile.linux": "fish",
+    "terminal.integrated.profiles.linux": {
+        "fish": {
+            "path": "fish",
+            "args": ["-l"]
+        }
+    },
+    "workbench.startupEditor": "none",
+    "workbench.editor.enablePreview": false,
+    "workbench.tree.indent": 16,
+    "explorer.confirmDelete": false,
+    "explorer.confirmDragAndDrop": false,
+    "explorer.fileNesting.enabled": true,
+    "explorer.fileNesting.patterns": {
+        "package.json": "*",
+        "*.ts": "${capture}.test.ts, ${capture}.spec.ts",
+        "*.js": "${capture}.test.js, ${capture}.spec.js"
+    },
+    "git.autofetch": true,
+    "git.confirmSync": false,
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/.git": true
+    },
+    "workbench.colorTheme": "Dracula Theme",
+    "workbench.iconTheme": "Catppuccin Perfect Latte",
+    "workbench.welcomePage.walkthroughs.openOnInstall": false
+}
+
